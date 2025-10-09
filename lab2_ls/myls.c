@@ -42,6 +42,7 @@ const char EntryCodes[] = "--dlcbps";
 
 const char Permissions[] = "rwx";
 
+size_t count_total(const char* dir);
 bool list_directory(const char* path, int flags);
 bool print_entry(const char* base_path, const char* entry, int flags);
 
@@ -308,10 +309,10 @@ bool print_entry(const char* base_path, const char* entry_name, int flags) {
 
         printf("%3lu ", info.st_nlink);
 
-        if (pwd_file) printf("%5s ", pwd_file->pw_name ? pwd_file->pw_name : "?");
+        if (pwd_file && pwd_file->pw_name) printf("%5s ", pwd_file->pw_name);
         else printf("%5d ", info.st_uid);
 
-        if (grp_file) printf("%5s ", grp_file->pw_name ? grp_file->pw_name : "?");
+        if (grp_file && grp_file->pw_name) printf("%5s ", grp_file->pw_name);
         else printf("%5d ", info.st_uid);
 
         printf("%6lu", info.st_size);
@@ -371,12 +372,44 @@ int compare_strings(const void *p1, const void *p2) {
     return strcmp( *(const char**) p1, *(const char**) p2);
 }
 
+size_t count_total(const char* dirpath) {
+    DIR* dir = NULL;
+    struct dirent* entry;
+    size_t total = 0;
+    dir = opendir(dirpath);
+    if (!dir) {
+        return 0;
+    }
+
+    for (entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
+        const char* filename = entry->d_name;
+        char *full_path = concat_strings(dirpath, filename);
+        if (!full_path) continue;
+
+        struct stat info;
+        int result = lstat(full_path, &info);
+        if ( result == 0 ) {
+            size_t blocks = info.st_blocks; // 512 B block
+            total += blocks/2 + blocks%2; // 1KB block
+        }
+
+        if (full_path) free(full_path);
+    }
+
+    if (dir) closedir(dir);
+
+    return total;
+}
+
 bool list_directory(const char* path, int flags) {
     bool result = false;
     DIR* dir = NULL;
     char **entry_names = NULL;
 
     size_t entry_count = 0;
+
+    size_t total = count_total(path);
+
     struct dirent* entry;
 
     dir = opendir(path);
@@ -413,7 +446,7 @@ bool list_directory(const char* path, int flags) {
 
     qsort(entry_names, entry_count, sizeof(char*), compare_strings);
 
-    if (flags & FLAG_LONG) printf("Total %lu\n", entry_count);
+    if (flags & FLAG_LONG) printf("Total %lu\n", total);
     for (i=0; i<entry_count; i++) {
         if (entry_names[i][0]=='.' && !(flags & FLAG_ALL)) continue;
 
