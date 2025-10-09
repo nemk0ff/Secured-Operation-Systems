@@ -1,4 +1,12 @@
-all: main
+CC = gcc
+CFLAGS = -Wall -Wextra -O2
+TARGET = myfork
+SOURCE = main.c
 
-main: main.c
-	gcc main.c -o main
+$(TARGET): $(SOURCE)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCE)
+
+clean:
+	rm -f $(TARGET)
+
+.PHONY: clean
