@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c99
+CFLAGS = -Wall -Wextra -O2
 TARGET = mychmod
 SOURCE = mychmod.c
 
@@ -9,4 +9,4 @@ $(TARGET): $(SOURCE)
 clean:
 	rm -f $(TARGET)
 
-.PHONY: clean
+.PHONY: cleancd
