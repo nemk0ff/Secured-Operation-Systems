@@ -1,470 +1,367 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <pwd.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <dirent.h>
-#include <stdbool.h>
+#include <stdlib.h>
 #include <errno.h>
+#include <string.h>
+#include <stdint.h>
+#include <pwd.h>
+#include <grp.h>
 #include <time.h>
+#include <limits.h>
+#include <getopt.h>
 
-typedef enum {
-    FLAG_ALL = 1, // -a
-    FLAG_LONG = 2 // -l
-} Flags;
+enum ListFlags {
+    LS_ALL = 1,
+    LS_LONG = 2
+};
 
-typedef enum {
-    ENTRY_UNDEFINED = 0, // standart color
-    ENTRY_FILE,          // standart color
-    ENTRY_DIR,           // blue
-    ENTRY_LINK,          // cyan
-    ENTRY_CHAR,          // yellow bold
-    ENTRY_BLOCK,         // yellow bold
-    ENTRY_PIPE,          // yellow
-    ENTRY_SOCK,          // magneta bold
-} EntryType;
+enum FileColor {
+    COL_FILE,
+    COL_DIR,
+    COL_EXEC,
+    COL_LN
+};
 
-const char EntryCodes[] = "--dlcbps";
+enum ErrorCode {
+    ERR_INVALIDOPT,
+    ERR_OPENDIR,
+    ERR_READDIR,
+    ERR_STAT,
+    ERR_PWD,
+    ERR_GRP
+};
 
-#define USER_READ(m) ((m) & S_IRUSR)
-#define USER_WRITE(m) ((m) & S_IWUSR)
-#define USER_EXECUTE(m) ((m) & S_IXUSR)
+static const int FILE_TYPE_COLORS[] = {39, 34, 32, 36};
 
-#define GROUP_READ(m) ((m) & S_IRGRP)
-#define GROUP_WRITE(m) ((m) & S_IWGRP)
-#define GROUP_EXECUTE(m) ((m) & S_IXGRP)
+static const char * const VALID_OPTIONS = "hla";
+static const char * const PERMISSION_CHARS = "rwx";
+static const char * const ANSI_RESET = "\x1b[0m";
+static const char * const ANSI_COLOR_PREFIX = "\x1b[";
+static const size_t MAX_PATH_LENGTH =
+#ifdef PATH_MAX
+        (size_t)PATH_MAX
+#else
+        (size_t)4096
+#endif
+;
 
-#define OTHER_READ(m) ((m) & S_IROTH)
-#define OTHER_WRITE(m) ((m) & S_IWOTH)
-#define OTHER_EXECUTE(m) ((m) & S_IXOTH)
+typedef struct {
+    char *pathBuffer;
+    const char *basePath;
+    DIR *openDir;
+    size_t entryCount;
+    struct dirent **entries;
+    int flags;
+} ProgramState;
 
-const char Permissions[] = "rwx";
+ProgramState g_state = {0};
 
-size_t count_total(const char* dir);
-bool list_directory(const char* path, int flags);
-bool print_entry(const char* base_path, const char* entry, int flags);
+void initProgram();
+void cleanupProgram();
+void failWithError(enum ErrorCode err);
+void composePath(const char *fileName);
+void collectEntries();
+void printEntry(struct dirent *entry);
+void listDirectory(const char *dirPath);
+int direntCompare(const void *a, const void *b);
 
-// allocates memory
-char* concat_strings(const char* base_path, const char* entry);
+int main(int argc, char **argv) {
+    initProgram();
 
-void set_color(int colorcode);
-void set_color_bold(int colorcode);
-void reset_color();
-
-const char flag_string[] = "hal";
-
-int main(int argc, char** argv) {
-    int flags = 0;
-    bool flag_usage = false;
-    int opt;
-
-    while ((opt = getopt(argc, argv, flag_string)) != -1) {
-        switch (opt) {
+    opterr = 0;
+    int option;
+    while ((option = getopt(argc, argv, VALID_OPTIONS)) != -1) {
+        switch (option) {
             case 'h':
-                flag_usage = true;
+                printf("ls - list directory contents\n"
+                       "usage: ls [params...] [file]\n"
+                       " -a - do not ignore entries starting with '.'\n"
+                       " -l - use a long listing format\n"
+                       " -h - print this message\n");
+                cleanupProgram();
+                exit(EXIT_SUCCESS);
+            case 'l':
+                g_state.flags |= LS_LONG;
                 break;
             case 'a':
-                flags |= FLAG_ALL;
+                g_state.flags |= LS_ALL;
                 break;
-            case 'l':
-                flags |= FLAG_LONG;
-                break;
-
-            default:
-                exit(1);
+            case '?':
+                failWithError(ERR_INVALIDOPT);
                 break;
         }
     }
 
-    if (flag_usage) {
-        printf("Usage:\n");
-        printf("myls [-h -l -a] [path]\n");
-        printf("\t-h\tHelp\n");
-        printf("\t-l\tLong print\n");
-        printf("\t-a\tList all files\n");
-
-        exit(0);
+    if (optind < argc - 1) {
+        fprintf(stderr, "[ls]: too many arguments\n");
+        cleanupProgram();
+        exit(EXIT_FAILURE);
     }
 
-
-    char* default_path = "./";
-
-    char* path;
-
-    if (optind == argc) path = default_path;
-    else path = argv[optind];
-
-    size_t pathlen = strlen(path);
-
-    char* adjusted_path = path;
-
-    if (path[pathlen-1] != '/') {
-        adjusted_path = malloc( sizeof(char)*(pathlen + 2) );
-        memcpy(adjusted_path, path, pathlen);
-        adjusted_path[pathlen] = '/';
-        adjusted_path[pathlen+1] = '\0';
-    }
-
-    if (!list_directory(adjusted_path, flags)) {
-        exit(1);
-    }
-
-    if (adjusted_path != path) {
-        free(adjusted_path);
-    }
-
-    return 0;
+    const char *targetDir = (optind == argc) ? "." : argv[optind];
+    listDirectory(targetDir);
+    cleanupProgram();
+    return EXIT_SUCCESS;
 }
 
-void set_color(int colorcode) {
-    printf("\e[%dm", colorcode);
-}
-void set_color_bold(int colorcode) {
-    printf("\e[%d;1m", colorcode);
-}
-void reset_color() {
-    printf("\e[0m");
+void initProgram() {
+    g_state.pathBuffer = (char *)malloc(MAX_PATH_LENGTH);
+    if (!g_state.pathBuffer) {
+        fprintf(stderr, "[ls]: memory allocation failed\n");
+        exit(EXIT_FAILURE);
+    }
 }
 
-char* get_link_target(const char* link_path) {
-    char buffer[PATH_MAX];
-
-    ssize_t size = readlink(link_path, buffer, sizeof(buffer));
-    if (size == -1) {
-        fprintf(stderr, "Cannot read link %s: %s\n", link_path, strerror(errno));
-        return NULL;
+void cleanupProgram() {
+    if (g_state.pathBuffer) {
+        free(g_state.pathBuffer);
+        g_state.pathBuffer = NULL;
     }
-
-    char* result = malloc(size + 1);
-    if (result == NULL) {
-        fprintf(stderr, "Cannot allocate %ld bytes\n", size);
-        return NULL;
+    if (g_state.openDir) {
+        closedir(g_state.openDir);
+        g_state.openDir = NULL;
     }
-
-    memcpy(result, buffer, size);
-    result[size] = '\0';
-
-    return result;
-}
-
-// allocates memory
-char* concat_strings(const char* s1, const char* s2) {
-    size_t s1_len = strlen(s1);
-    size_t s2_len = strlen(s2);
-    char* res = malloc(s1_len + s2_len + 1);
-    memcpy(res, s1, s1_len);
-    memcpy(res + s1_len, s2, s2_len);
-    res[s1_len + s2_len] = '\0';
-    return res;
-}
-
-bool print_entry(const char* base_path, const char* entry_name, int flags) {
-    bool result = false;
-    char *full_path = NULL;
-
-    char *link_full_path = NULL;
-
-
-    full_path = concat_strings(base_path, entry_name);
-
-    struct stat info, link_info;
-    if (lstat(full_path, &info) != 0) {
-        fprintf(stderr, "Error stat'ing %s : %s\n", full_path, strerror(errno));
-        goto DEFER;
-    }
-
-    if (stat(full_path, &link_info) != 0) {
-        fprintf(stderr, "Error stat'ing %s : %s\n", full_path, strerror(errno));
-        goto DEFER;
-    }
-
-    struct passwd *pwd_file = NULL;
-    pwd_file = getpwuid(info.st_uid);
-    // if (!pwd_file) {
-    //     fprintf(stderr, "Error getting uid of %s : %s\n", full_path, strerror(errno));
-    //     goto DEFER;
-    // }
-
-    struct passwd *grp_file = NULL;
-    grp_file = getpwuid(info.st_gid);
-    // if (!grp_file) {
-    //     fprintf(stderr, "Error getting gid of %s : %s\n", full_path, strerror(errno));
-    //     goto DEFER;
-    // }
-
-    char *time_str = ctime(&info.st_mtim.tv_sec);
-    if (!time_str) {
-        fprintf(stderr, "Error getting time of %s : %s\n", full_path, strerror(errno));
-        goto DEFER;
-    }
-    char cut_time[13];
-    memcpy(cut_time, time_str+4, 12);
-    cut_time[12] = '\0';
-
-    bool name_has_spaces = (bool) strchr(entry_name, ' ');
-
-    EntryType type = ENTRY_UNDEFINED;
-
-    int color_code = 39;
-    bool bold_text = false;
-
-    int link_color_code = 39;
-    bool link_bold_text = false;
-
-    if (S_ISREG(info.st_mode)) {
-        type = ENTRY_FILE;
-        if ( USER_EXECUTE(info.st_mode) ) {
-            bold_text = true;
-            color_code = 32;
+    if (g_state.entries) {
+        for (size_t i = 0; i < g_state.entryCount; i++) {
+            free(g_state.entries[i]);
         }
-    } else
-    if (S_ISDIR(info.st_mode)) {
-        type = ENTRY_DIR;
-        color_code = 34;
-        bold_text = true;
-    } else
-    if (S_ISLNK(info.st_mode)) {
-        type = ENTRY_LINK;
-        color_code = 36;
-        bold_text = true;
+        free(g_state.entries);
+        g_state.entries = NULL;
+    }
+}
 
-        link_full_path = get_link_target(full_path);
-    } else
-    if (S_ISCHR(info.st_mode)) {
-        type = ENTRY_CHAR;
-        color_code = 33;
-        bold_text = true;
-    } else
-    if (S_ISBLK(info.st_mode)) {
-        type = ENTRY_BLOCK;
-        color_code = 33;
-        bold_text = true;
-    } else
-    if (S_ISFIFO(info.st_mode)) {
-        color_code = 33;
-        type = ENTRY_PIPE;
-    } else
-    if (S_ISSOCK(info.st_mode)) {
-        type = ENTRY_SOCK;
-        color_code = 35;
-        bold_text = true;
+void failWithError(enum ErrorCode err) {
+    const char *message = NULL;
+
+    switch (err) {
+        case ERR_INVALIDOPT:
+            message = "invalid option, see \"ls -h\"";
+            break;
+        case ERR_OPENDIR:
+            message = strerror(errno);
+            break;
+        case ERR_READDIR:
+            message = strerror(errno);
+            break;
+        case ERR_STAT:
+            message = strerror(errno);
+            break;
+        case ERR_PWD:
+            message = strerror(errno);
+            break;
+        case ERR_GRP:
+            message = strerror(errno);
+            break;
     }
 
-    if (link_full_path) {
-        if (S_ISREG(link_info.st_mode)) {
-            if ( USER_EXECUTE(link_info.st_mode) ) {
-                link_bold_text = true;
-                link_color_code = 32;
+    fprintf(stderr, "[ls]: %s\n", message);
+    cleanupProgram();
+    exit(EXIT_FAILURE);
+}
+
+void composePath(const char *fileName) {
+    if (!g_state.basePath) {
+        g_state.basePath = ".";
+    }
+
+    int written = snprintf(g_state.pathBuffer, MAX_PATH_LENGTH, "%s/%s",
+                           g_state.basePath, fileName);
+    if (written < 0 || (size_t)written >= MAX_PATH_LENGTH) {
+        fprintf(stderr, "[ls]: path too long\n");
+        cleanupProgram();
+        exit(EXIT_FAILURE);
+    }
+}
+
+void collectEntries() {
+    struct dirent *entry;
+    size_t capacity = 32;
+
+    g_state.entries = (struct dirent **)malloc(capacity * sizeof(struct dirent *));
+    if (!g_state.entries) {
+        failWithError(ERR_READDIR);
+    }
+
+    g_state.entryCount = 0;
+    errno = 0;
+
+    while ((entry = readdir(g_state.openDir)) != NULL) {
+        if (g_state.entryCount >= capacity) {
+            capacity *= 2;
+            struct dirent **newEntries = (struct dirent **)realloc(
+                    g_state.entries, capacity * sizeof(struct dirent *));
+            if (!newEntries) {
+                for (size_t i = 0; i < g_state.entryCount; i++) {
+                    free(g_state.entries[i]);
+                }
+                free(g_state.entries);
+                g_state.entries = NULL;
+                failWithError(ERR_READDIR);
             }
-        } else
-        if (S_ISDIR(link_info.st_mode)) {
-            link_color_code = 34;
-            link_bold_text = true;
-        } else
-        if (S_ISLNK(link_info.st_mode)) {
-            link_color_code = 36;
-            link_bold_text = true;
-
-            link_full_path = get_link_target(full_path);
-        } else
-        if (S_ISCHR(link_info.st_mode)) {
-            link_color_code = 33;
-            link_bold_text = true;
-        } else
-        if (S_ISBLK(link_info.st_mode)) {
-            link_color_code = 33;
-            link_bold_text = true;
-        } else
-        if (S_ISFIFO(link_info.st_mode)) {
-            link_color_code = 33;
-        } else
-        if (S_ISSOCK(link_info.st_mode)) {
-            link_color_code = 35;
-            link_bold_text = true;
+            g_state.entries = newEntries;
         }
+
+        struct dirent *entryCopy = (struct dirent *)malloc(sizeof(struct dirent));
+        if (!entryCopy) {
+            for (size_t i = 0; i < g_state.entryCount; i++) {
+                free(g_state.entries[i]);
+            }
+            free(g_state.entries);
+            g_state.entries = NULL;
+            failWithError(ERR_READDIR);
+        }
+        memcpy(entryCopy, entry, sizeof(struct dirent));
+        g_state.entries[g_state.entryCount++] = entryCopy;
     }
 
+    if (errno) {
+        for (size_t i = 0; i < g_state.entryCount; i++) {
+            free(g_state.entries[i]);
+        }
+        free(g_state.entries);
+        g_state.entries = NULL;
+        failWithError(ERR_READDIR);
+    }
 
-    if (flags & FLAG_LONG) {
-        putc(EntryCodes[type], stdout);
+    qsort(g_state.entries, g_state.entryCount, sizeof(struct dirent *), direntCompare);
+}
 
-        // User permissions
-        putc( USER_READ(info.st_mode) ? 'r' : '-' , stdout );
-        putc( USER_WRITE(info.st_mode) ? 'w' : '-' , stdout );
-        putc( USER_EXECUTE(info.st_mode) ? 'x' : '-' , stdout );
+void printEntry(struct dirent *entry) {
+    if (entry->d_name[0] == '.' && !(g_state.flags & LS_ALL)) {
+        free(entry);
+        return;
+    }
 
-        // Group permissions
-        putc( GROUP_READ(info.st_mode) ? 'r' : '-' , stdout );
-        putc( GROUP_WRITE(info.st_mode) ? 'w' : '-' , stdout );
-        putc( GROUP_EXECUTE(info.st_mode) ? 'x' : '-' , stdout );
+    composePath(entry->d_name);
+    enum FileColor filename_color = COL_FILE;
+    struct stat file_info;
 
-        // Others permissions
-        putc( OTHER_READ(info.st_mode) ? 'r' : '-' , stdout );
-        putc( OTHER_WRITE(info.st_mode) ? 'w' : '-' , stdout );
-        putc( OTHER_EXECUTE(info.st_mode) ? 'x' : '-' , stdout );
+    if (lstat(g_state.pathBuffer, &file_info) == -1) {
+        free(entry);
+        failWithError(ERR_STAT);
+    }
 
-        putc( ' ' , stdout );
-
-        printf("%3lu ", info.st_nlink);
-
-        if (pwd_file && pwd_file->pw_name) printf("%5s ", pwd_file->pw_name);
-        else printf("%5d ", info.st_uid);
-
-        if (grp_file && grp_file->pw_name) printf("%5s ", grp_file->pw_name);
-        else printf("%5d ", info.st_uid);
-
-        printf("%6lu", info.st_size);
-
-        putc( ' ' , stdout );
-
-        printf("%s", cut_time);
-
-        putc( ' ' , stdout );
-
-        if (bold_text) set_color_bold(color_code);
-        else set_color(color_code);
-
-        if (name_has_spaces) printf("`%s`", entry_name);
-        else printf("%s", entry_name);
-
-        reset_color();
-
-        if (link_full_path) {
-            printf (" -> ");
-
-            if (link_bold_text) set_color_bold(link_color_code);
-            else set_color(link_color_code);
-
-            bool link_target_has_spaces = (bool) strchr(link_full_path, ' ');
-
-            if (link_target_has_spaces) printf("`%s`", link_full_path);
-            else printf("%s", link_full_path);
-
-            reset_color();
+    if (g_state.flags & LS_LONG) {
+        char fileTypeChar = '?';
+        if (S_ISREG(file_info.st_mode)) {
+            fileTypeChar = '-';
+            if (file_info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) {
+                filename_color = COL_EXEC;
+            }
+        } else if (S_ISDIR(file_info.st_mode)) {
+            fileTypeChar = 'd';
+            filename_color = COL_DIR;
+        } else if (S_ISCHR(file_info.st_mode)) {
+            fileTypeChar = 'c';
+        } else if (S_ISBLK(file_info.st_mode)) {
+            fileTypeChar = 'b';
+        } else if (S_ISFIFO(file_info.st_mode)) {
+            fileTypeChar = 'p';
+        } else if (S_ISLNK(file_info.st_mode)) {
+            fileTypeChar = 'l';
+            filename_color = COL_LN;
+        } else if (S_ISSOCK(file_info.st_mode)) {
+            fileTypeChar = 's';
         }
 
-        putc( '\n' , stdout );
+        putchar(fileTypeChar);
 
+        mode_t mode = file_info.st_mode;
+        const mode_t permissions[] = {S_IRUSR, S_IWUSR, S_IXUSR,
+                                      S_IRGRP, S_IWGRP, S_IXGRP,
+                                      S_IROTH, S_IWOTH, S_IXOTH};
+
+        for (int i = 0; i < 9; i++) {
+            putchar(mode & permissions[i] ? PERMISSION_CHARS[i % 3] : '-');
+        }
+        putchar(' ');
+
+        printf("%lu ", (unsigned long)file_info.st_nlink);
+
+        struct passwd *pwd_file = getpwuid(file_info.st_uid);
+        if (pwd_file) {
+            printf("%-8s ", pwd_file->pw_name);
+        } else {
+            printf("%-8u ", (unsigned)file_info.st_uid);
+        }
+
+        struct group *grp_file = getgrgid(file_info.st_gid);
+        if (grp_file) {
+            printf("%-8s ", grp_file->gr_name);
+        } else {
+            printf("%-8u ", (unsigned)file_info.st_gid);
+        }
+
+        // Для специальных файлов (символьных и блочных устройств) выводим только размер
+        if (S_ISCHR(file_info.st_mode) || S_ISBLK(file_info.st_mode)) {
+            printf("%8lld ", (long long)file_info.st_size);
+        } else {
+            printf("%8lld ", (long long)file_info.st_size);
+        }
+
+        char time_buf[64];
+        struct tm *tm_info = localtime(&file_info.st_mtime);
+        strftime(time_buf, sizeof(time_buf), "%b %d %H:%M", tm_info);
+        printf("%s ", time_buf);
+
+        printf("%s%dm%s%s", ANSI_COLOR_PREFIX, FILE_TYPE_COLORS[filename_color],
+               entry->d_name, ANSI_RESET);
+
+        if (S_ISLNK(file_info.st_mode)) {
+            char link_buf[PATH_MAX];
+            ssize_t link_len = readlink(g_state.pathBuffer, link_buf, sizeof(link_buf) - 1);
+            if (link_len != -1) {
+                link_buf[link_len] = '\0';
+                printf(" -> %s", link_buf);
+            }
+        }
+        printf("\n");
     } else {
-        if (bold_text) set_color_bold(color_code);
-        else set_color(color_code);
-
-        if (name_has_spaces) printf("`%s`", entry_name);
-        else printf("%s", entry_name);
-
-        reset_color();
-
-        putc( ' ' , stdout );
-    }
-
-
-    result = true;
-    DEFER:
-    if (full_path) free(full_path);
-    if (link_full_path) free(link_full_path);
-
-    return result;
-}
-
-int compare_strings(const void *p1, const void *p2) {
-    return strcmp( *(const char**) p1, *(const char**) p2);
-}
-
-size_t count_total(const char* dirpath) {
-    DIR* dir = NULL;
-    struct dirent* entry;
-    size_t total = 0;
-    dir = opendir(dirpath);
-    if (!dir) {
-        return 0;
-    }
-
-    for (entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
-        const char* filename = entry->d_name;
-        char *full_path = concat_strings(dirpath, filename);
-        if (!full_path) continue;
-
-        struct stat info;
-        int result = lstat(full_path, &info);
-        if ( result == 0 ) {
-            size_t blocks = info.st_blocks; // 512 B block
-            total += blocks/2 + blocks%2; // 1KB block
+        if (S_ISDIR(file_info.st_mode)) {
+            filename_color = COL_DIR;
+        } else if (S_ISLNK(file_info.st_mode)) {
+            filename_color = COL_LN;
+        } else if (file_info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) {
+            filename_color = COL_EXEC;
         }
 
-        if (full_path) free(full_path);
+        printf("%s%dm%-20s%s", ANSI_COLOR_PREFIX, FILE_TYPE_COLORS[filename_color],
+               entry->d_name, ANSI_RESET);
     }
 
-    if (dir) closedir(dir);
-
-    return total;
+    free(entry);
 }
 
-bool list_directory(const char* path, int flags) {
-    bool result = false;
-    DIR* dir = NULL;
-    char **entry_names = NULL;
-
-    size_t entry_count = 0;
-
-    size_t total = count_total(path);
-
-    struct dirent* entry;
-
-    dir = opendir(path);
-    if (!dir) {
-        fprintf(stderr, "Cannot open directory %s\n", path);
-        goto DEFER;
+void listDirectory(const char *dirPath) {
+    g_state.openDir = opendir(dirPath);
+    if (!g_state.openDir) {
+        failWithError(ERR_OPENDIR);
     }
 
-    for (entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
-        if (entry->d_name[0]=='.' && !(flags & FLAG_ALL)) continue;
-        entry_count++;
+    g_state.basePath = dirPath;
+    collectEntries();
+
+    for (size_t i = 0; i < g_state.entryCount; i++) {
+        printEntry(g_state.entries[i]);
     }
 
-    rewinddir(dir);
+    g_state.entryCount = 0;
+    free(g_state.entries);
+    g_state.entries = NULL;
 
-    if (entry_count == 0) {
-        printf("Directory is empty\n");
-        result = true;
-        goto DEFER;
+    if (!(g_state.flags & LS_LONG)) {
+        putchar('\n');
     }
+}
 
-    entry_names = malloc(entry_count * sizeof(char*));
-    if (!entry_names) {
-        fprintf(stderr, "Cannot allocate %ld bytes\n", entry_count * sizeof(char*));
-        goto DEFER;
-    }
+int direntCompare(const void *a, const void *b) {
+    const struct dirent *f = *(const struct dirent **)a;
+    const struct dirent *s = *(const struct dirent **)b;
 
-    size_t i=0;
-    for (entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
-        if (entry->d_name[0]=='.' && !(flags & FLAG_ALL)) continue;
-        entry_names[i] = strdup(entry->d_name);
-        i++;
-    }
+    if (f->d_name[0] == '.' && s->d_name[0] != '.') return -1;
+    if (f->d_name[0] != '.' && s->d_name[0] == '.') return 1;
 
-    qsort(entry_names, entry_count, sizeof(char*), compare_strings);
-
-    if (flags & FLAG_LONG) printf("Total %lu\n", total);
-    for (i=0; i<entry_count; i++) {
-        if (entry_names[i][0]=='.' && !(flags & FLAG_ALL)) continue;
-
-        if (!print_entry(path, entry_names[i], flags)) {
-            goto DEFER;
-        }
-    }
-
-    if (!(flags & FLAG_LONG)) putc('\n', stdout);
-
-    result = true;
-    DEFER:
-    if (dir) closedir(dir);
-    if (entry_names) {
-        for (size_t i=0; i<entry_count; i++) {
-            free(entry_names[i]);
-        }
-        free(entry_names);
-    }
-    return result;
+    return strcasecmp(f->d_name, s->d_name);
 }

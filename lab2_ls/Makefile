@@ -1,9 +1,14 @@
-CFLAGS=-Wall -Wextra -Wparentheses
+CC = gcc
+CFLAGS = -Wall -Wextra -O2
 
-all: myls
+TARGETS = myls
+
+.PHONY: all clean
+
+all: $(TARGETS)
 
 myls: myls.c
-	gcc $(CFLAGS) myls.c -o myls
+	$(CC) $(CFLAGS) -o myls demls.c
 
-clear:
-	rm myls myls.exe
+clean:
+	rm -f $(TARGETS)
