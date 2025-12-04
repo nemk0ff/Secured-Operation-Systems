@@ -1,8 +1,23 @@
-.PHONY: all send receive clean
-all: receive send
-send: send.c
-	gcc send.c -o send
-receive: receive.c
-	gcc receive.c -o receive
+# Build configuration for shared memory demonstration
+CC = gcc
+CFLAGS = -Wall -Wextra -O2
+LDFLAGS = -lrt -lpthread
+
+.PHONY: all transmitter receiver clean
+
+all: transmitter receiver
+
+transmitter: sender.c
+	$(CC) $(CFLAGS) sender.c -o transmitter $(LDFLAGS)
+
+receiver: receiver.c
+	$(CC) $(CFLAGS) receiver.c -o receiver $(LDFLAGS)
+
 clean:
-	rm -rf *.o send receive
+	rm -f transmitter receiver
+
+run_transmitter: transmitter
+	./transmitter
+
+run_receiver: receiver
+	./receiver
