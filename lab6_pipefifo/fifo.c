@@ -7,104 +7,110 @@
 #include <time.h>
 #include <sys/wait.h>
 
-#define BUF_SIZE 256
+#define BUFFER_SIZE 256
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Не указан аргумент - имя FIFO.\n");
+        fprintf(stderr, "Usage: %s <fifo_name>\n", argv[0]);
         return 1;
     }
 
-    const char *fifoname = argv[1];
-
+    const char *fifo_name = argv[1];
     struct stat st;
-    if (stat(fifoname, &st) == 0) {
-        fprintf(stderr, "Файл %s уже существует\n", fifoname);
+
+    if (stat(fifo_name, &st) == 0) {
+        fprintf(stderr, "File '%s' already exists\n", fifo_name);
         return 1;
     }
 
-    if (mkfifo(fifoname, 0600) == -1) {  // Права доступа: чтение/запись только владельцу
-        perror("Ошибка создания FIFO");
+    if (mkfifo(fifo_name, 0600) < 0) {
+        perror("mkfifo failed");
         return EXIT_FAILURE;
     }
 
     int fd;
-    char buffer[BUF_SIZE];
-    time_t t;
-    struct tm *tm_info;
+    char buffer[BUFFER_SIZE];
+    time_t now;
+    struct tm *timeinfo;
     char time_str[64];
 
-    pid_t child_pid = fork();
+    pid_t pid = fork();
 
-    switch (child_pid) {
+    switch (pid) {
         case -1:
-            perror("Ошибка форка");
-            unlink(fifoname);
+            perror("fork failed");
+            unlink(fifo_name);
             return EXIT_FAILURE;
         case 0:
-            if ((fd = open(fifoname, O_RDONLY)) == -1) {
-                perror("Ошибка открытия FIFO для чтения");
-                unlink(fifoname);
+            /* Child process - reads from FIFO */
+            fd = open(fifo_name, O_RDONLY);
+            if (fd < 0) {
+                perror("open for reading failed");
+                unlink(fifo_name);
                 return EXIT_FAILURE;
             }
 
-            time(&t);
-            tm_info = localtime(&t);
-            strftime(time_str, sizeof(time_str), "%a %b %d %T %Y", tm_info);
+            time(&now);
+            timeinfo = localtime(&now);
+            strftime(time_str, sizeof(time_str),
+                     "%a %b %d %H:%M:%S %Y", timeinfo);
 
-            printf("Time in CHILD process %s\n", time_str);
+            printf("Child process time: %s\n", time_str);
 
-            if (read(fd, buffer, BUF_SIZE) == -1) {
-                perror("Ошибка чтения из FIFO");
+            if (read(fd, buffer, BUFFER_SIZE) < 0) {
+                perror("read from fifo failed");
                 close(fd);
-                unlink(fifoname);
+                unlink(fifo_name);
                 return EXIT_FAILURE;
             }
 
-            printf("%s", buffer);
+            printf("Received from parent: %s", buffer);
 
-            if (close(fd) == -1) {
-                perror("Ошибка закрытия FIFO");
-                unlink(fifoname);
+            if (close(fd) < 0) {
+                perror("close failed");
+                unlink(fifo_name);
                 return EXIT_FAILURE;
             }
-
             break;
         default:
-            if ((fd = open(fifoname, O_WRONLY)) == -1) {
-                perror("Ошибка открытия FIFO для записи");
-                unlink(fifoname);
+            /* Parent process - writes to FIFO */
+            fd = open(fifo_name, O_WRONLY);
+            if (fd < 0) {
+                perror("open for writing failed");
+                unlink(fifo_name);
                 return EXIT_FAILURE;
             }
 
             sleep(5);
 
-            time(&t);
-            tm_info = localtime(&t);
-            strftime(time_str, sizeof(time_str), "%a %b %d %T %Y", tm_info);
+            time(&now);
+            timeinfo = localtime(&now);
+            strftime(time_str, sizeof(time_str),
+                     "%a %b %d %H:%M:%S %Y", timeinfo);
 
-            snprintf(buffer, BUF_SIZE, "Time in PARENT process %s\nPARENT pid = %d\n", time_str, getpid());
+            snprintf(buffer, BUFFER_SIZE,
+                     "Parent process time: %s\nParent PID: %d\n",
+                     time_str, getpid());
 
-            if (write(fd, buffer, strlen(buffer)) == -1) {
-                perror("Ошибка записи в FIFO");
+            if (write(fd, buffer, strlen(buffer)) < 0) {
+                perror("write to fifo failed");
                 close(fd);
-                unlink(fifoname);
+                unlink(fifo_name);
                 return EXIT_FAILURE;
             }
 
-            if (close(fd) == -1) {
-                perror("Ошибка закрытия FIFO");
-                unlink(fifoname);
+            if (close(fd) < 0) {
+                perror("close failed");
+                unlink(fifo_name);
                 return EXIT_FAILURE;
             }
 
             wait(NULL);
 
-            if (unlink(fifoname) == -1) {
-                perror("Ошибка удаления FIFO");
+            if (unlink(fifo_name) < 0) {
+                perror("unlink failed");
                 return EXIT_FAILURE;
             }
-
             break;
     }
 

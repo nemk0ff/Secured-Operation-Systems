@@ -5,57 +5,63 @@
 #include <string.h>
 #include <time.h>
 
-#define BUF_SIZE 256
+#define BUFFER_SIZE 256
 
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
-    int fd[2];
-    char buffer[BUF_SIZE];
+    (void)argc;
+    (void)argv;
 
-    if (pipe(fd) == -1) {
-        perror("Ошибка создания pipe");
+    int pipe_fd[2];
+    char buffer[BUFFER_SIZE];
+
+    if (pipe(pipe_fd) < 0) {
+        perror("pipe creation failed");
         exit(EXIT_FAILURE);
     }
 
-    pid_t child_pid = fork();
-
-    time_t t;
-    struct tm *tm_info;
+    pid_t pid = fork();
+    time_t now;
+    struct tm *timeinfo;
     char time_str[64];
 
-    switch(child_pid) {
+    switch(pid) {
         case -1:
-            perror("Ошибка форка");
+            perror("fork failed");
             exit(EXIT_FAILURE);
-            break;
         case 0:
-            close(fd[1]);
+            /* Child process - reads from pipe */
+            close(pipe_fd[1]);
 
-            time(&t);
-            tm_info = localtime(&t);
-            strftime(time_str, sizeof(time_str), "%a %b %d %T %Y", tm_info);
+            time(&now);
+            timeinfo = localtime(&now);
+            strftime(time_str, sizeof(time_str),
+                     "%a %b %d %H:%M:%S %Y", timeinfo);
 
-            printf("Time in CHILD process %s\n", time_str);
+            printf("Child process time: %s\n", time_str);
 
-            read(fd[0], buffer, BUF_SIZE);
-            printf("%s", buffer);
+            read(pipe_fd[0], buffer, BUFFER_SIZE);
+            printf("Received from parent: %s", buffer);
 
-            close(fd[0]);
+            close(pipe_fd[0]);
             break;
         default:
-            close(fd[0]);
+            /* Parent process - writes to pipe */
+            close(pipe_fd[0]);
 
             sleep(5);
 
-            time(&t);
-            tm_info = localtime(&t);
-            strftime(time_str, sizeof(time_str), "%a %b %d %T %Y", tm_info);
+            time(&now);
+            timeinfo = localtime(&now);
+            strftime(time_str, sizeof(time_str),
+                     "%a %b %d %H:%M:%S %Y", timeinfo);
 
-            snprintf(buffer, BUF_SIZE, "Time in PARENT process %s\nPARENT pid = %d\n", time_str, getpid());
+            snprintf(buffer, BUFFER_SIZE,
+                     "Parent process time: %s\nParent PID: %d\n",
+                     time_str, getpid());
 
-            write(fd[1], buffer, strlen(buffer));
+            write(pipe_fd[1], buffer, strlen(buffer));
 
-            close(fd[1]);
+            close(pipe_fd[1]);
 
             wait(NULL);
             break;
