@@ -1,100 +1,74 @@
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <string.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/types.h>
 #include <time.h>
-#include <signal.h>
-#include <semaphore.h>
+#include <unistd.h>
 
-// Имя сегмента разделяемой памяти
-const char *SHM_NAME = "/shm_time";
-const char *SEM_NAME = "/sem_time"; // Имя семафора
+#include "header.h"
 
-// Структура данных для передачи
-typedef struct {
-    time_t timestamp;
-    pid_t pid;
-    char message[128];
-} shared_data_t;
+void *shmaddr;
+int shmid;
 
-void cleanup(int sig) {
-    shm_unlink(SHM_NAME); // Освобождаем разделяемую память при получении сигнала
-    sem_unlink(SEM_NAME); // Освобождаем семафор при получении сигнала
+void free_at_exit(int sig)
+{
+    (void)sig;
+    shmdt(shmaddr);
     exit(EXIT_SUCCESS);
 }
 
-int main() {
-    signal(SIGINT, cleanup);
-    signal(SIGTERM, cleanup);
-
-    // Создаем семафор для синхронизации
-    sem_t *sem = sem_open(SEM_NAME, O_CREAT, 0644, 1);
-    if (sem == SEM_FAILED) {
-        perror("Ошибка создания семафора");
-        return EXIT_FAILURE;
-    }
-
-    // Количество попыток открыть сегмент
-    int attempts = 5;
-    for (int i = 0; i < attempts; i++) {
-        // Открываем существующий сегмент разделяемой памяти
-        int shm_fd = shm_open(SHM_NAME, O_RDONLY, 0644);
-        if (shm_fd != -1) {
-            break;
-        } else if (i == attempts - 1) {
-            perror("Ошибка открытия разделяемой памяти");
-            sem_close(sem);
-            return EXIT_FAILURE;
-        } else {
-            sleep(1);
+int main()
+{
+    key_t shmkey = ftok(FNAME, FTOK_ID);
+    if (shmkey == -1)
+    {
+        if (errno == ENOENT)
+        {
+            fprintf(stderr, "[receiver]: you should execute \"sender\" program before!\n");
         }
+        exit(EXIT_FAILURE);
     }
 
-    // Открываем существующий сегмент разделяемой памяти
-    int shm_fd = shm_open(SHM_NAME, O_RDONLY, 0644);
-    if (shm_fd == -1) {
-        perror("Ошибка открытия разделяемой памяти");
-        sem_close(sem);
-        return EXIT_FAILURE;
+    shmid = shmget(shmkey, sizeof(shm_transfer_t), 0);
+    if (shmid == -1) {
+        perror("shmget");
+        exit(EXIT_FAILURE);
     }
 
-    // Отображаем сегмент разделяемой памяти в адресное пространство процесса
-    shared_data_t *data = mmap(NULL, sizeof(shared_data_t), PROT_READ, MAP_SHARED, shm_fd, 0);
-    if (data == MAP_FAILED) {
-        perror("Ошибка отображения разделяемой памяти");
-        close(shm_fd);
-        sem_close(sem);
-        return EXIT_FAILURE;
+    shmaddr = shmat(shmid, NULL, SHM_RDONLY);
+    if (shmaddr == (void *)-1) {
+        perror("shmat");
+        exit(EXIT_FAILURE);
     }
 
-    while (1) {
-        // Блокируем семафор перед чтением данных
-        sem_wait(sem);
+    signal(SIGINT, free_at_exit);
+    signal(SIGTERM, free_at_exit);
 
-        // Проверяем, если сообщение не пустое
-        if (strlen(data->message) > 0) {
-            printf("Received: %s\n", data->message);
+    for (;;)
+    {
+        shm_transfer_t received_data;
+        memcpy(&received_data, shmaddr, sizeof(shm_transfer_t));
 
-            time_t current_time = time(NULL);
-            char buffer[26];  //хранение строки времени
-            strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&current_time));
+        if (strlen(received_data.data_string) > 0) {
+            printf("[receiver]: got data: %s\n", received_data.data_string);
 
-            printf("Current Time: %s, Current PID: %d\n", buffer, getpid());
+            time_t local_time = time(NULL);
+            char local_time_buffer[80];
+            struct tm* local_time_info = localtime(&local_time);
+            strftime(local_time_buffer, sizeof(local_time_buffer),
+                     "%Y-%m-%d %H:%M:%S", local_time_info);
+
+            printf("[receiver]: receiver time: %s, receiver PID: %d\n",
+                   local_time_buffer, getpid());
         } else {
-            printf("No message received.\n");
+            printf("[receiver]: no data available\n");
         }
 
-        // Освобождаем семафор после чтения
-        sem_post(sem);
         sleep(5);
     }
-
-    munmap(data, sizeof(shared_data_t));
-    close(shm_fd);
-    sem_close(sem);
-
-    return 0;
 }

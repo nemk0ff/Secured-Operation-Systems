@@ -1,99 +1,97 @@
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <semaphore.h>
 #include <string.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/types.h>
 #include <time.h>
-#include <signal.h>
-#include <errno.h>
+#include <unistd.h>
 
-// Имя сегмента разделяемой памяти
-const char *SHM_NAME = "/shm_time";
-const char *SEMAPHORE_NAME = "/shm_sem"; // Имя семафора
+#include "header.h"
 
-// Структура данных для передачи
-typedef struct {
-    time_t timestamp;
-    pid_t pid;
-    char message[128];
-} shared_data_t;
+int shmid;
+void *shmaddr;
 
-sem_t *sem;
-
-void cleanup(void) {
-    shm_unlink(SHM_NAME);
-    sem_close(sem);
-    sem_unlink(SEMAPHORE_NAME);
+void free_at_exit(int sig)
+{
+    (void)sig;
+    shmdt(shmaddr);
+    shmctl(shmid, IPC_RMID, NULL);
+    unlink(FNAME);
+    exit(EXIT_SUCCESS);
 }
 
-void handle_signal(int sig) {
-    cleanup();
-    exit(0);
+void write_string_in_shm()
+{
+    shm_transfer_t transfer_data;
+
+    transfer_data.current_time = time(NULL);
+    transfer_data.process_id = getpid();
+
+    struct tm* time_info = localtime(&transfer_data.current_time);
+    char time_buffer[80];
+    strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S", time_info);
+
+    snprintf(transfer_data.data_string, BUFSIZE,
+             "Sender time: %s, Sender PID: %d",
+             time_buffer, transfer_data.process_id);
+
+    memcpy(shmaddr, &transfer_data, sizeof(shm_transfer_t));
+    printf("[sender]: data has been written: %s\n", transfer_data.data_string);
 }
 
-int main() {
-    // Обработка сигналов
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
-
-    // Инициализация семафора для проверки уникального запуска
-    sem = sem_open(SEMAPHORE_NAME, O_CREAT | O_EXCL, 0644, 1);
-    if (sem == SEM_FAILED) {
-        if (errno == EEXIST) {
-            fprintf(stderr, "Процесс уже запущен!\n");
-            return EXIT_FAILURE;
-        } else {
-            perror("Ошибка создания семафора");
-            return EXIT_FAILURE;
+int main()
+{
+    // Создаем файл для ftok
+    int fd = open(FNAME, O_CREAT | O_EXCL | O_WRONLY, 0666);
+    if (fd == -1)
+    {
+        if (errno == EEXIST)
+        {
+            fprintf(stderr, "[sender]: transmitter already running!\n");
         }
+        else
+        {
+            perror("open");
+        }
+        exit(EXIT_FAILURE);
+    }
+    close(fd);
+
+    key_t shmkey = ftok(FNAME, FTOK_ID);
+    if (shmkey == -1)
+    {
+        perror("ftok");
+        exit(EXIT_FAILURE);
     }
 
-    // Создаем сегмент разделяемой памяти
-    int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0644);
-    if (shm_fd == -1) {
-        perror("Ошибка создания разделяемой памяти");
-        sem_close(sem);
-        sem_unlink(SEMAPHORE_NAME);
-        return EXIT_FAILURE;
+    // Создаем shared memory
+    shmid = shmget(shmkey, sizeof(shm_transfer_t), IPC_CREAT | IPC_EXCL | 0666);
+    if (shmid == -1)
+    {
+        perror("shmget");
+        exit(EXIT_FAILURE);
     }
 
-    // Устанавливаем размер сегмента разделяемой памяти
-    if (ftruncate(shm_fd, sizeof(shared_data_t)) == -1) {
-        perror("Ошибка установки размера разделяемой памяти");
-        shm_unlink(SHM_NAME);
-        sem_close(sem);
-        sem_unlink(SEMAPHORE_NAME);
-        return EXIT_FAILURE;
+    shmaddr = shmat(shmid, NULL, 0);
+    if (shmaddr == (void *)-1)
+    {
+        perror("shmat");
+        exit(EXIT_FAILURE);
     }
 
-    // Отображаем сегмент разделяемой памяти в адресное пространство процесса
-    shared_data_t *data = mmap(NULL, sizeof(shared_data_t), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (data == MAP_FAILED) {
-        perror("Ошибка отображения разделяемой памяти");
-        shm_unlink(SHM_NAME);
-        sem_close(sem);
-        sem_unlink(SEMAPHORE_NAME);
-        return EXIT_FAILURE;
-    }
+    // Настраиваем обработку сигналов
+    signal(SIGTERM, free_at_exit);
+    signal(SIGINT, free_at_exit);
+    memset(shmaddr, 0, sizeof(shm_transfer_t));
 
-    close(shm_fd);
-
-    while (1) {
-        data->timestamp = time(NULL);
-        data->pid = getpid();
-
-        char formatted_time[80];
-        strftime(formatted_time, sizeof(formatted_time), "%Y-%m-%d %H:%M:%S", localtime(&data->timestamp));
-        snprintf(data->message, sizeof(data->message), "Time: %s, PID: %d", formatted_time, data->pid);
-
+    // mainloop
+    for (;;)
+    {
+        write_string_in_shm();
         sleep(5);
     }
-
-    munmap(data, sizeof(shared_data_t));
-    cleanup(); // Освобождаем ресурсы
-
-    return 0;
 }
