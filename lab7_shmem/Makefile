@@ -1,23 +1,23 @@
-# Build configuration for shared memory demonstration
 CC = gcc
 CFLAGS = -Wall -Wextra -O2
-LDFLAGS = -lrt -lpthread
+LDFLAGS =
 
-.PHONY: all transmitter receiver clean
+.PHONY: all clean sender receiver run_sender run_receiver
 
-all: transmitter receiver
+all: sender receiver
 
-transmitter: sender.c
-	$(CC) $(CFLAGS) sender.c -o transmitter $(LDFLAGS)
+sender: send.c header.h
+	$(CC) $(CFLAGS) send.c -o sender $(LDFLAGS)
 
-receiver: receiver.c
-	$(CC) $(CFLAGS) receiver.c -o receiver $(LDFLAGS)
+receiver: receive.c header.h
+	$(CC) $(CFLAGS) receive.c -o receiver $(LDFLAGS)
 
 clean:
-	rm -f transmitter receiver
+	rm -f sender receiver
+	rm -f /tmp/.time-transfer-info
 
-run_transmitter: transmitter
-	./transmitter
+run_sender: sender
+	./sender
 
 run_receiver: receiver
 	./receiver
