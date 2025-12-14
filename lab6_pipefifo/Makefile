@@ -1,4 +1,4 @@
-# Флаги компилятора
+# Compiler flags
 CFLAGS = -Wall -g
 
 all: mypipe myfifo

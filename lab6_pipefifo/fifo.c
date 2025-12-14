@@ -33,6 +33,7 @@ int main(int argc, char **argv) {
     time_t now;
     struct tm *timeinfo;
     char time_str[64];
+    ssize_t bytes_read;
 
     pid_t pid = fork();
 
@@ -57,14 +58,16 @@ int main(int argc, char **argv) {
 
             printf("Child process time: %s\n", time_str);
 
-            if (read(fd, buffer, BUFFER_SIZE) < 0) {
+            bytes_read = read(fd, buffer, BUFFER_SIZE - 1);
+            if (bytes_read < 0) {
                 perror("read from fifo failed");
                 close(fd);
                 unlink(fifo_name);
                 return EXIT_FAILURE;
+            } else if (bytes_read > 0) {
+                buffer[bytes_read] = '\0';  // Add null terminator
+                printf("Received from parent: %s", buffer);
             }
-
-            printf("Received from parent: %s", buffer);
 
             if (close(fd) < 0) {
                 perror("close failed");

@@ -13,6 +13,7 @@ int main(int argc, char** argv) {
 
     int pipe_fd[2];
     char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
 
     if (pipe(pipe_fd) < 0) {
         perror("pipe creation failed");
@@ -39,8 +40,13 @@ int main(int argc, char** argv) {
 
             printf("Child process time: %s\n", time_str);
 
-            read(pipe_fd[0], buffer, BUFFER_SIZE);
-            printf("Received from parent: %s", buffer);
+            bytes_read = read(pipe_fd[0], buffer, BUFFER_SIZE - 1);
+            if (bytes_read > 0) {
+                buffer[bytes_read] = '\0';  // Add null terminator
+                printf("Received from parent: %s", buffer);
+            } else if (bytes_read < 0) {
+                perror("read failed");
+            }
 
             close(pipe_fd[0]);
             break;
