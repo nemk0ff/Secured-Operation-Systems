@@ -5,120 +5,143 @@
 #include <unistd.h>
 #include <errno.h>
 
-void display_error_and_exit(const char *error_message) {
-    perror(error_message);
+// Helper for error reporting
+void report_system_error(const char *message_context) {
+    perror(message_context);
     exit(EXIT_FAILURE);
 }
 
-int process_octal_permissions(const char *octal_mode_string, const char *target_filename) {
-    char *validation_pointer;
-    long calculated_mode = strtol(octal_mode_string, &validation_pointer, 8);
+// Handle numeric (octal) permission changes
+int apply_numeric_mode(const char *mode_input, const char *target_path) {
+    char *end_ptr;
+    // Convert string to octal number
+    long mode_value = strtol(mode_input, &end_ptr, 8);
 
-    if (*validation_pointer != '\0' || calculated_mode < 0 || calculated_mode > 07777) {
-        fprintf(stderr, "mychmod: invalid octal mode specification '%s'\n", octal_mode_string);
-        return 1;
+    // Validate the octal string
+    if (*end_ptr != '\0' || mode_value < 0 || mode_value > 07777) {
+        fprintf(stderr, "mode: invalid numeric permission '%s'\n", mode_input);
+        return EXIT_FAILURE;
     }
 
-    if (chmod(target_filename, (mode_t)calculated_mode) == -1) {
-        display_error_and_exit(target_filename);
+    // Apply the mode change
+    if (chmod(target_path, (mode_t)mode_value) == -1) {
+        report_system_error(target_path);
     }
-    return 0;
+    return EXIT_SUCCESS;
 }
 
-int process_symbolic_permissions(const char *symbolic_mode_string, const char *target_filename) {
-    struct stat file_statistics;
-    if (stat(target_filename, &file_statistics) == -1) {
-        display_error_and_exit(target_filename);
+// Handle symbolic permission changes
+int apply_symbolic_mode(const char *mode_spec, const char *target_path) {
+    struct stat file_info;
+    if (stat(target_path, &file_info) == -1) {
+        report_system_error(target_path);
     }
 
-    mode_t existing_permissions = file_statistics.st_mode;
-    mode_t updated_permissions = existing_permissions;
+    mode_t current_mode = file_info.st_mode;
+    mode_t new_mode = current_mode;
 
-    const char *current_position = symbolic_mode_string;
+    const char *parse_pos = mode_spec;
 
-    int permission_categories = 0;
-    while (*current_position && strchr("ugoa", *current_position)) {
-        switch (*current_position) {
-            case 'u': permission_categories |= 1 << 2; break;
-            case 'g': permission_categories |= 1 << 1; break;
-            case 'o': permission_categories |= 1 << 0; break;
-            case 'a': permission_categories |= 0b111; break;
+    // Parse user/group/other specifiers
+    int categories = 0;
+    while (*parse_pos && strchr("ugoa", *parse_pos)) {
+        switch (*parse_pos) {
+            case 'u': categories |= 4; break;  // 100 binary
+            case 'g': categories |= 2; break;  // 010 binary
+            case 'o': categories |= 1; break;  // 001 binary
+            case 'a': categories |= 7; break;  // 111 binary
         }
-        current_position++;
+        parse_pos++;
     }
 
-    if (permission_categories == 0) {
-        permission_categories = 0b111;
+    // Default to all categories if none specified
+    if (categories == 0) {
+        categories = 7;
     }
 
-    if (*current_position != '+' && *current_position != '-' && *current_position != '=') {
-        fprintf(stderr, "mychmod: invalid permission operator in '%s'\n", symbolic_mode_string);
-        return 1;
+    // Validate operator
+    if (*parse_pos != '+' && *parse_pos != '-' && *parse_pos != '=') {
+        fprintf(stderr, "mode: invalid operator in '%s'\n", mode_spec);
+        return EXIT_FAILURE;
     }
 
-    char permission_operator = *current_position++;
-    mode_t permission_bits = 0;
-    while (*current_position) {
-        switch (*current_position) {
-            case 'r': permission_bits |= S_IRUSR | S_IRGRP | S_IROTH; break;
-            case 'w': permission_bits |= S_IWUSR | S_IWGRP | S_IWOTH; break;
-            case 'x': permission_bits |= S_IXUSR | S_IXGRP | S_IXOTH; break;
+    char operation = *parse_pos++;
+    mode_t permission_flags = 0;
+
+    // Parse permission characters
+    while (*parse_pos) {
+        switch (*parse_pos) {
+            case 'r': permission_flags |= S_IRUSR | S_IRGRP | S_IROTH; break;
+            case 'w': permission_flags |= S_IWUSR | S_IWGRP | S_IWOTH; break;
+            case 'x': permission_flags |= S_IXUSR | S_IXGRP | S_IXOTH; break;
             default:
-                fprintf(stderr, "mychmod: invalid permission character '%c' in '%s'\n", *current_position, symbolic_mode_string);
-                return 1;
+                fprintf(stderr, "mode: invalid permission '%c' in '%s'\n", *parse_pos, mode_spec);
+                return EXIT_FAILURE;
         }
-        current_position++;
+        parse_pos++;
     }
 
-    mode_t permission_mask = 0;
-    if (permission_categories & (1 << 2)) permission_mask |= S_IRWXU;
-    if (permission_categories & (1 << 1)) permission_mask |= S_IRWXG;
-    if (permission_categories & (1 << 0)) permission_mask |= S_IRWXO;
+    // Calculate mask for selected categories
+    mode_t category_mask = 0;
+    if (categories & 4) category_mask |= S_IRWXU;  // User
+    if (categories & 2) category_mask |= S_IRWXG;  // Group
+    if (categories & 1) category_mask |= S_IRWXO;  // Others
 
-    mode_t applicable_bits = 0;
-    if (permission_categories & (1 << 2)) applicable_bits |= (permission_bits & S_IRWXU);
-    if (permission_categories & (1 << 1)) applicable_bits |= (permission_bits & S_IRWXG);
-    if (permission_categories & (1 << 0)) applicable_bits |= (permission_bits & S_IRWXO);
+    // Apply permissions to selected categories only
+    mode_t effective_bits = 0;
+    if (categories & 4) effective_bits |= (permission_flags & S_IRWXU);
+    if (categories & 2) effective_bits |= (permission_flags & S_IRWXG);
+    if (categories & 1) effective_bits |= (permission_flags & S_IRWXO);
 
-    switch (permission_operator) {
+    // Apply the operation
+    switch (operation) {
         case '+':
-            updated_permissions |= applicable_bits;
+            new_mode |= effective_bits;
             break;
         case '-':
-            updated_permissions &= ~applicable_bits;
+            new_mode &= ~effective_bits;
             break;
         case '=':
-            updated_permissions &= ~permission_mask;
-            updated_permissions |= applicable_bits;
+            new_mode &= ~category_mask;
+            new_mode |= effective_bits;
             break;
     }
 
-    if (chmod(target_filename, updated_permissions) == -1) {
-        display_error_and_exit(target_filename);
+    // Apply the new mode
+    if (chmod(target_path, new_mode) == -1) {
+        report_system_error(target_path);
     }
-    return 0;
+    return EXIT_SUCCESS;
 }
 
-int main(int argument_count, char *argument_values[]) {
-    if (argument_count != 3) {
-        fprintf(stderr, "Usage: %s <permission_mode> <target_file>\n", argument_values[0]);
-        exit(EXIT_FAILURE);
+// Main program entry point
+int main(int argc, char *argv[]) {
+    // Check argument count
+    if (argc != 3) {
+        fprintf(stderr, "Permission Manager\n");
+        fprintf(stderr, "Usage: %s <mode> <file>\n", argv[0]);
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  %s 755 script.sh\n", argv[0]);
+        fprintf(stderr, "  %s u+x document.txt\n", argv[0]);
+        fprintf(stderr, "  %s go-rw config.cfg\n", argv[0]);
+        return EXIT_FAILURE;
     }
 
-    const char *mode_specification = argument_values[1];
-    const char *target_file = argument_values[2];
+    const char *mode_string = argv[1];
+    const char *target_file = argv[2];
 
-    int is_octal_format = 1;
-    for (int index = 0; mode_specification[index]; index++) {
-        if (mode_specification[index] < '0' || mode_specification[index] > '7') {
-            is_octal_format = 0;
+    // Determine if input is numeric or symbolic
+    int is_numeric = 1;
+    for (int i = 0; mode_string[i]; i++) {
+        if (mode_string[i] < '0' || mode_string[i] > '7') {
+            is_numeric = 0;
             break;
         }
     }
 
-    if (is_octal_format) {
-        return process_octal_permissions(mode_specification, target_file);
+    if (is_numeric) {
+        return apply_numeric_mode(mode_string, target_file);
     } else {
-        return process_symbolic_permissions(mode_specification, target_file);
+        return apply_symbolic_mode(mode_string, target_file);
     }
 }
